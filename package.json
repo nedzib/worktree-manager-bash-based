@@ -1,37 +1,20 @@
 {
   "name": "@jx0/wtm",
-  "version": "2.0.0",
-  "description": "Git worktree management CLI tool",
-  "main": "dist/index.js",
-  "module": "dist/index.js",
-  "type": "module",
+  "version": "3.0.0",
+  "description": "Git worktree management CLI tool (pure Bash)",
+  "main": "wtm",
   "bin": {
-    "wtm": "./dist/index.js"
+    "wtm": "./wtm"
   },
   "scripts": {
-    "start": "bun run index.ts",
-    "dev": "bun --watch index.ts",
-    "build": "bun build index.ts --outdir ./dist --target bun --format esm",
-    "test": "bun test",
-    "link": "bun link",
-    "unlink": "bun unlink"
-  },
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
-  },
-  "engines": {
-    "bun": ">=1.0.0"
+    "test": "echo 'No automated tests. Test manually with: ./wtm help'"
   },
   "files": [
-    "dist"
+    "wtm"
   ],
-  "keywords": ["git", "worktree", "cli", "bun"],
+  "keywords": ["git", "worktree", "cli", "bash"],
   "author": "Jarred Kenny <jarred.kenny@tracktile.io>",
   "license": "MIT",
-  "dependencies": {
-    "@inquirer/prompts": "^8.2.0"
-  }
+  "dependencies": {},
+  "devDependencies": {}
 }

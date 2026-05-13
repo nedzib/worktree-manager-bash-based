@@ -1,16 +1,14 @@
 # Worktree Manager (wtm)
 
-🌳 **A fast, modern CLI tool for managing Git worktrees in bare repositories**
+🌳 **A lightweight Bash CLI tool for managing Git worktrees in bare repositories**
 
-[![Built with Bun](https://img.shields.io/badge/Built%20with-Bun-black)](https://bun.sh/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
-Worktree Manager simplifies Git worktree operations, making it easy to work with multiple branches simultaneously in bare repositories. Perfect for CI/CD environments, shared development servers, or anyone who wants to streamline their Git workflow.
+Worktree Manager simplifies Git worktree operations, making it easy to work with multiple branches simultaneously in bare repositories. Perfect for CI/CD environments, shared development servers, or anyone who wants to streamline their Git workflow. Zero runtime dependencies other than Bash and Git.
 
 ## ✨ Features
 
-- **Lightning fast** - Built with Bun for maximum performance
+- **Zero dependencies** - Pure Bash. No Bun, Node, or anything else required
 - **Easy setup** - Clone or adopt any repo into a wtm-managed bare structure with one command
 - **Bare repository focused** - Designed specifically for bare Git repositories
 - **Smart branch management** - Automatic fetching and branch creation
@@ -23,20 +21,17 @@ Worktree Manager simplifies Git worktree operations, making it easy to work with
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) runtime (v1.0+)
+- Bash (any modern version)
 - Git installed and configured
 
 ### Install from npm
 
 ```bash
 # Install globally with your preferred package manager
-bun install -g @jx0/wtm
+npm install -g @jx0/wtm
 
 # or
 pnpm add -g @jx0/wtm
-
-# or
-npm install -g @jx0/wtm
 
 # or
 yarn global add @jx0/wtm
@@ -45,23 +40,18 @@ yarn global add @jx0/wtm
 wtm help
 ```
 
-### Development Setup
-
-For contributors who want to work on the source code:
+### Manual / Development Setup
 
 ```bash
 # Clone the repository
 git clone https://github.com/your-username/worktree-manager.git
 cd worktree-manager
 
-# Install dependencies
-bun install
+# Run directly
+./wtm help
 
-# Link for local development
-bun link
-
-# For development with auto-reload
-bun run dev
+# Or link into your PATH for local use
+ln -s "$(pwd)/wtm" /usr/local/bin/wtm
 ```
 
 ## 🚀 Quick Start
@@ -390,24 +380,24 @@ Earlier versions of wtm looked for hooks at the **bare repository root** (e.g. `
 
 ```
 worktree-manager/
-├── src/
-│   ├── cli.ts           # Command parsing and routing
-│   ├── init.ts          # Repository initialization
-│   ├── worktree.ts      # Core worktree operations
-│   ├── cleanup.ts       # Cleanup detection and UI
-│   └── hooks.ts         # Hook execution system
-├── index.ts             # Main entry point
-├── package.json         # Project configuration
+├── wtm                  # Single Bash script — all commands included
+├── package.json         # NPM metadata (for global installs)
 └── README.md           # Documentation
 ```
 
-**Key Components:**
+**Why a single Bash script?**
 
-- **InitManager**: Clones or adopts repos into wtm-managed bare structure
-- **WorktreeManager**: Core class handling Git operations
-- **CleanupManager**: Detects merged worktrees and handles cleanup flow
-- **HookManager**: Executes lifecycle hooks with proper environment
-- **CLI Parser**: Robust argument parsing and command routing
+`wtm` is intentionally a thin wrapper around Git's native `worktree` commands. Rather than pulling in a runtime like Bun or Node, everything is implemented in portable Bash — making it trivial to install, inspect, and modify.
+
+**Key functions inside `wtm`:**
+
+- `wtm_cmd_init` — Clone or adopt repositories
+- `wtm_cmd_create` — Create worktrees from a base branch
+- `wtm_cmd_checkout` — Create worktrees from existing remote branches
+- `wtm_cmd_list` — Parse `git worktree list --porcelain` into a table
+- `wtm_cmd_delete` — Remove worktrees safely
+- `wtm_cmd_cleanup` — Detect merged branches with interactive selection
+- `wtm_run_hook` — Execute `.wtm/post_create` hooks with environment variables
 
 ## 🔧 Configuration
 
@@ -509,24 +499,19 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 # Clone and setup
 git clone https://github.com/your-username/worktree-manager.git
 cd worktree-manager
-bun install
 
-# Run in development mode
-bun run dev
-
-# Build
-bun run build
-
-# Run tests (when available)
-bun test
+# Test your changes locally
+./wtm help
+./wtm list
 ```
+
+Since `wtm` is a single Bash script, changes are immediate — no build step required. Just edit `wtm` and run.
 
 ### Project Structure
 
-- Keep core logic in `src/worktree.ts`
-- Add new commands in `src/cli.ts`
-- Hook system extensions go in `src/hooks.ts`
-- Follow existing TypeScript patterns
+- All logic lives in the single `wtm` script
+- Keep commands as thin wrappers around `git worktree` when possible
+- Follow existing Bash patterns (portable syntax, no Bashisms beyond `[[ ]]`)
 
 ## 📝 License
 
@@ -534,13 +519,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔗 Links
 
-- [Bun Documentation](https://bun.sh/docs)
 - [Git Worktree Documentation](https://git-scm.com/docs/git-worktree)
-- [TypeScript Handbook](https://www.typescriptlang.org/docs/)
+- [Bash Reference Manual](https://www.gnu.org/software/bash/manual/)
 
 ---
 
-**Made with ❤️ and [Bun](https://bun.sh/)**
+**Made with ❤️ and Bash**
 
 _Worktree Manager - Because managing Git worktrees shouldn't be a tree of problems_ 🌳
 

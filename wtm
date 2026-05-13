@@ -1,0 +1,877 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =============================================================================
+# wtm — Worktree Manager (pure Bash)
+# A thin wrapper around git worktree for managing bare repositories.
+# =============================================================================
+
+WTM_VERSION="3.0.0"
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+wtm_err() {
+  echo "❌ Error: $1" >&2
+  exit 1
+}
+
+wtm_warn() {
+  echo "⚠️  Warning: $1" >&2
+}
+
+wtm_info() {
+  echo "ℹ️  $1"
+}
+
+wtm_success() {
+  echo "✅ $1"
+}
+
+wtm_ensure_bare() {
+  local git_dir=".git"
+  if [[ -d "$git_dir" ]]; then
+    local bare
+    bare=$(git --git-dir="$git_dir" config --get core.bare 2>/dev/null || true)
+    if [[ "$bare" == "true" ]]; then
+      return 0
+    fi
+  fi
+  local bare_cwd
+  bare_cwd=$(git config --get core.bare 2>/dev/null || true)
+  if [[ "$bare_cwd" != "true" ]]; then
+    wtm_err "This command must be run in a bare git repository"
+  fi
+}
+
+wtm_repo_name_from_url() {
+  local url="$1"
+  url="${url%/}"
+  url="${url%.git}"
+  if [[ "$url" =~ [/:]([a-zA-Z0-9_.-]+)$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    wtm_err "Could not extract repository name from URL: $url"
+  fi
+}
+
+wtm_detect_default_branch() {
+  local git_dir="${1:-.git}"
+  local branch
+  branch=$(git --git-dir="$git_dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|^refs/remotes/origin/||' || true)
+  if [[ -n "$branch" ]]; then
+    echo "$branch"
+    return 0
+  fi
+  if git --git-dir="$git_dir" rev-parse --verify refs/remotes/origin/main &>/dev/null; then
+    echo "main"
+    return 0
+  fi
+  if git --git-dir="$git_dir" rev-parse --verify refs/remotes/origin/master &>/dev/null; then
+    echo "master"
+    return 0
+  fi
+  wtm_err "Could not detect default branch. Neither origin/HEAD, main, nor master found."
+}
+
+wtm_fetch_branch() {
+  local branch="$1"
+  local remote_hash
+  remote_hash=$(git ls-remote origin "$branch" 2>/dev/null | awk '{print $1}')
+  if [[ -z "$remote_hash" ]]; then
+    wtm_err "Remote branch '$branch' not found on origin"
+  fi
+
+  git update-ref -d "refs/remotes/origin/$branch" 2>/dev/null || true
+  git fetch origin "+${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1 || true
+
+  local local_hash
+  local_hash=$(git rev-parse "origin/$branch" 2>/dev/null || true)
+  if [[ "$local_hash" != "$remote_hash" ]]; then
+    wtm_err "Failed to fetch latest $branch. Remote is at $remote_hash but local tracking is at ${local_hash:-(empty)}"
+  fi
+
+  wtm_success "Fetched $branch at ${remote_hash:0:9}"
+}
+
+wtm_list_worktrees_json() {
+  # Outputs one worktree per line as: path|commit|branch|isBare
+  git worktree list --porcelain 2>/dev/null | awk '
+    BEGIN { RS=""; FS="\n" }
+    {
+      path=""; commit=""; branch=""; isBare=0
+      for(i=1;i<=NF;i++) {
+        if ($i ~ /^worktree /) path=substr($i,10)
+        else if ($i ~ /^HEAD /) commit=substr($i,6)
+        else if ($i ~ /^branch /) branch=substr($i,8)
+        else if ($i == "bare") isBare=1
+      }
+      if (path) {
+        gsub(/refs\//,"",branch)
+        gsub(/heads\//,"",branch)
+        print path "|" commit "|" branch "|" isBare
+      }
+    }
+  '
+}
+
+wtm_find_worktree_path() {
+  local name="$1"
+  while IFS='|' read -r path commit branch isBare; do
+    if [[ "$path" == */"$name" || "$branch" == "$name" ]]; then
+      echo "$path"
+      return 0
+    fi
+  done < <(wtm_list_worktrees_json)
+  return 1
+}
+
+wtm_find_worktree_branch() {
+  local name="$1"
+  while IFS='|' read -r path commit branch isBare; do
+    if [[ "$path" == */"$name" || "$branch" == "$name" ]]; then
+      echo "$branch"
+      return 0
+    fi
+  done < <(wtm_list_worktrees_json)
+  return 1
+}
+
+wtm_run_hook() {
+  local worktree_path="$1"
+  local hook_name="$2"
+  local worktree_name="$3"
+  local base_branch="$4"
+  local bare_path
+  bare_path="$(pwd)"
+
+  local hook_file="$worktree_path/.wtm/$hook_name"
+  if [[ ! -f "$hook_file" ]]; then
+    return 0
+  fi
+
+  echo "🪝 Running $hook_name hook..."
+  (
+    export WORKTREE_DIR="$worktree_path"
+    export WORKTREE_NAME="$worktree_name"
+    export BASE_BRANCH="$base_branch"
+    export BARE_REPO_PATH="$bare_path"
+    cd "$worktree_path"
+    if [[ -x "$hook_file" ]]; then
+      bash "$hook_file"
+    else
+      bash "$hook_file"
+    fi
+  ) || wtm_err "Hook $hook_name failed"
+  wtm_success "$hook_name hook completed successfully"
+}
+
+# =============================================================================
+# init
+# =============================================================================
+
+wtm_cmd_init() {
+  local first_arg="${1:-}"
+  local second_arg="${2:-}"
+
+  if [[ -z "$first_arg" ]]; then
+    # adopt current directory
+    wtm_cmd_init_adopt ""
+    return 0
+  fi
+
+  # Is it an existing directory with a .git repo?
+  if [[ -d "$first_arg" && ( -d "$first_arg/.git" || -f "$first_arg/.git" ) ]]; then
+    wtm_cmd_init_adopt "$first_arg"
+    return 0
+  fi
+
+  # Otherwise treat as URL
+  local url="$first_arg"
+  local target_dir="${second_arg:-$(wtm_repo_name_from_url "$url")}"
+
+  if [[ -e "$target_dir" ]]; then
+    wtm_err "Directory already exists: $target_dir"
+  fi
+
+  echo "Initializing wtm repository: $target_dir"
+  mkdir -p "$target_dir"
+
+  echo "Cloning $url..."
+  git clone --bare "$url" "$target_dir/.git"
+
+  git --git-dir="$target_dir/.git" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+  echo "Fetching all branches..."
+  git --git-dir="$target_dir/.git" fetch origin
+
+  local default_branch
+  default_branch=$(wtm_detect_default_branch "$target_dir/.git")
+  echo "Detected default branch: $default_branch"
+
+  if ! git --git-dir="$target_dir/.git" worktree add "$target_dir/$default_branch" "origin/$default_branch" 2>/dev/null; then
+    wtm_warn "Could not create initial worktree for $default_branch"
+  else
+    wtm_success "Created initial worktree: $default_branch"
+  fi
+
+  echo ""
+  echo "Repository initialized successfully!"
+  echo ""
+  echo "Next steps:"
+  echo "  cd $target_dir/$default_branch"
+  echo "  wtm create <branch-name>    # Create a new worktree"
+  echo "  wtm list                    # List all worktrees"
+  echo ""
+  echo "To run setup commands after worktree creation, commit a script to .wtm/post_create on your base branch."
+}
+
+wtm_cmd_init_adopt() {
+  local target_dir
+  target_dir="$(cd "${1:-.}" && pwd)"
+  local git_dir="$target_dir/.git"
+
+  # 1. .git must be a directory
+  if [[ ! -d "$git_dir" ]]; then
+    if [[ -f "$git_dir" ]]; then
+      wtm_err "Not a git repository — .git is a file (this is already a worktree)."
+    else
+      wtm_err "Not a git repository: $target_dir (no .git directory found)"
+    fi
+  fi
+
+  # 2. Not already bare
+  local bare_val
+  bare_val=$(git -C "$target_dir" config --get core.bare 2>/dev/null || true)
+  if [[ "$bare_val" == "true" ]]; then
+    wtm_err "This is already a bare repository. If it's wtm-managed, use wtm commands directly."
+  fi
+
+  # 3. Remote origin exists
+  if ! git -C "$target_dir" remote get-url origin &>/dev/null; then
+    wtm_err "No remote 'origin' found. wtm requires a remote to function. Add one with: git remote add origin <url>"
+  fi
+
+  # 4. Clean working tree
+  if ! git -C "$target_dir" diff --quiet 2>/dev/null || ! git -C "$target_dir" diff --cached --quiet 2>/dev/null; then
+    wtm_err "Working tree has uncommitted changes. Please commit or stash before running wtm init."
+  fi
+
+  # 5. No existing worktrees
+  local wt_count
+  wt_count=$(git -C "$target_dir" worktree list --porcelain 2>/dev/null | awk 'BEGIN{RS="";n=0} {n++} END{print n}')
+  if [[ "$wt_count" -gt 1 ]]; then
+    wtm_err "Repository has existing worktrees. Please remove them before running wtm init."
+  fi
+
+  # 6. Not detached HEAD
+  local current_branch
+  current_branch=$(git -C "$target_dir" branch --show-current 2>/dev/null || true)
+  if [[ -z "$current_branch" ]]; then
+    wtm_err "HEAD is detached. Please checkout a branch before running wtm init."
+  fi
+
+  # 7. No stale temp dir
+  if [[ -d "$target_dir/.wtm-adopt-tmp" ]]; then
+    wtm_err "Found .wtm-adopt-tmp/ — a previous adopt may have failed. Please inspect and remove it manually."
+  fi
+
+  local default_branch="unknown"
+  default_branch=$(wtm_detect_default_branch "$git_dir" 2>/dev/null || echo "unknown")
+
+  echo "Adopting repository: $target_dir"
+  echo "Current branch: $current_branch"
+  echo "Default branch: $default_branch"
+
+  # --- Conversion with rollback ---
+  local tmp_dir="$target_dir/.wtm-adopt-tmp"
+  local worktree_path="$target_dir/$current_branch"
+  local bare_set=0
+  local worktree_created=0
+
+  rollback() {
+    echo "Adopt failed, reverting changes..." >&2
+    if [[ "$worktree_created" == "1" ]]; then
+      git --git-dir="$git_dir" worktree remove "$worktree_path" --force 2>/dev/null || true
+      rm -rf "$worktree_path" 2>/dev/null || true
+    fi
+    if [[ "$bare_set" == "1" ]]; then
+      git -C "$target_dir" config core.bare false 2>/dev/null || true
+    fi
+    if [[ -d "$tmp_dir" ]]; then
+      for entry in "$tmp_dir"/*; do
+        [[ -e "$entry" ]] || continue
+        local base
+        base=$(basename "$entry")
+        # avoid overwriting if something exists
+        if [[ ! -e "$target_dir/$base" ]]; then
+          mv "$entry" "$target_dir/$base" 2>/dev/null || true
+        fi
+      done
+      rm -rf "$tmp_dir" 2>/dev/null || true
+    fi
+  }
+
+  trap rollback ERR
+
+  mkdir -p "$tmp_dir"
+  for entry in "$target_dir"/*; do
+    [[ -e "$entry" ]] || continue
+    local base
+    base=$(basename "$entry")
+    [[ "$base" == ".git" || "$base" == ".wtm-adopt-tmp" ]] && continue
+    mv "$entry" "$tmp_dir/$base"
+  done
+
+  git -C "$target_dir" config core.bare true
+  bare_set=1
+
+  git -C "$target_dir" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+  git --git-dir="$git_dir" fetch origin
+
+  git --git-dir="$git_dir" worktree add "$worktree_path" "$current_branch"
+  worktree_created=1
+
+  # Restore non-tracked files (no-clobber)
+  if [[ -d "$tmp_dir" ]]; then
+    for entry in "$tmp_dir"/*; do
+      [[ -e "$entry" ]] || continue
+      local base
+      base=$(basename "$entry")
+      if [[ ! -e "$worktree_path/$base" ]]; then
+        cp -r "$entry" "$worktree_path/$base" 2>/dev/null || true
+      fi
+    done
+    rm -rf "$tmp_dir"
+  fi
+
+  trap - ERR
+
+  echo ""
+  echo "Repository adopted successfully!"
+  echo ""
+  echo "Your code is now at: $worktree_path"
+  echo "Bare repository at:  $git_dir"
+  echo ""
+  echo "Next steps:"
+  echo "  cd $current_branch"
+  echo "  wtm create <name> --from $current_branch"
+  echo "  wtm list"
+}
+
+# =============================================================================
+# create
+# =============================================================================
+
+wtm_cmd_create() {
+  local name=""
+  local base_branch=""
+  local no_shell=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from)
+        base_branch="$2"
+        shift 2
+        ;;
+      --no-shell)
+        no_shell=1
+        shift
+        ;;
+      -*)
+        wtm_err "Unknown flag: $1"
+        ;;
+      *)
+        if [[ -z "$name" ]]; then
+          name="$1"
+        else
+          wtm_err "Unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then
+    wtm_err "Worktree name is required. Usage: wtm create <name> --from <base_branch>"
+  fi
+  if [[ -z "$base_branch" ]]; then
+    wtm_err "Base branch is required. Usage: wtm create <name> --from <base_branch>"
+  fi
+
+  wtm_ensure_bare
+  wtm_fetch_branch "$base_branch"
+
+  local worktree_path
+  worktree_path="$(pwd)/$name"
+
+  if [[ -e "$worktree_path" ]]; then
+    wtm_err "Path already exists: $worktree_path"
+  fi
+
+  git worktree add -b "$name" "$worktree_path" "origin/$base_branch"
+  wtm_success "Created worktree '$name' from latest '$base_branch' at $worktree_path"
+
+  # Set up remote tracking
+  (
+    cd "$worktree_path"
+    git config "branch.$name.remote" origin
+    git config "branch.$name.merge" "refs/heads/$name"
+    git fetch origin "$name:refs/remotes/origin/$name" 2>/dev/null || true
+  ) || wtm_warn "Could not set up remote tracking for branch $name"
+
+  wtm_run_hook "$worktree_path" "post_create" "$name" "$base_branch"
+
+  if [[ "$no_shell" == "1" ]]; then
+    return 0
+  fi
+
+  echo "📁 Starting new shell in $worktree_path"
+  local shell="${SHELL:-/bin/bash}"
+  cd "$worktree_path"
+  exec "$shell"
+}
+
+# =============================================================================
+# checkout
+# =============================================================================
+
+wtm_cmd_checkout() {
+  local name="$1"
+  if [[ -z "$name" ]]; then
+    wtm_err "Worktree name is required. Usage: wtm checkout <name>"
+  fi
+
+  wtm_ensure_bare
+
+  local existing_path
+  existing_path=$(wtm_find_worktree_path "$name" 2>/dev/null || true)
+  if [[ -n "$existing_path" ]]; then
+    wtm_success "Worktree '$name' exists at $existing_path"
+    echo "💡 To work in this worktree, run: cd $existing_path"
+    return 0
+  fi
+
+  echo "Worktree '$name' not found. Checking for remote branch..."
+
+  if ! git ls-remote --heads origin "$name" | grep -q "$name"; then
+    local available
+    available=$(wtm_list_worktrees_json | awk -F'|' '$4==0 {print "  - "$3}' | sed 's/^$3$//' || true)
+    wtm_err "Worktree '$name' not found and no remote branch 'origin/$name' exists.\nAvailable worktrees:\n${available:-(none)}\nTo create a new worktree: wtm create $name --from <base_branch>"
+  fi
+
+  echo "Found remote branch 'origin/$name'. Creating worktree..."
+  wtm_fetch_branch "$name"
+
+  local worktree_path
+  worktree_path="$(pwd)/$name"
+
+  if git show-ref --verify --quiet "refs/heads/$name"; then
+    git worktree add "$worktree_path" "$name"
+    wtm_success "Created worktree '$name' from existing branch at $worktree_path"
+  else
+    git worktree add -b "$name" "$worktree_path" "origin/$name"
+    wtm_success "Created worktree '$name' from remote branch at $worktree_path"
+  fi
+
+  (
+    cd "$worktree_path"
+    git config "branch.$name.remote" origin
+    git config "branch.$name.merge" "refs/heads/$name"
+  )
+
+  wtm_run_hook "$worktree_path" "post_create" "$name" "$name"
+  echo "💡 To work in this worktree, run: cd $worktree_path"
+}
+
+# =============================================================================
+# list
+# =============================================================================
+
+wtm_cmd_list() {
+  wtm_ensure_bare
+
+  local lines=()
+  while IFS='|' read -r path commit branch isBare; do
+    lines+=("$path|$commit|$branch|$isBare")
+  done < <(wtm_list_worktrees_json)
+
+  if [[ ${#lines[@]} -eq 0 ]]; then
+    echo "No worktrees found"
+    return 0
+  fi
+
+  echo ""
+  echo "Worktrees:"
+  printf '%80s\n' '' | tr ' ' '─'
+
+  for line in "${lines[@]}"; do
+    IFS='|' read -r path commit branch isBare <<< "$line"
+    local name
+    name=$(basename "$path")
+    local status
+    if [[ "$isBare" == "1" || "$branch" == "" ]]; then
+      status="(bare)"
+    else
+      status="[$branch]"
+    fi
+    printf '%-30s %-20s %s\n' "$name" "$status" "${commit:0:9}"
+  done
+}
+
+# =============================================================================
+# delete
+# =============================================================================
+
+wtm_cmd_delete() {
+  local name=""
+  local force=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force)
+        force=1
+        shift
+        ;;
+      -*)
+        wtm_err "Unknown flag: $1"
+        ;;
+      *)
+        if [[ -z "$name" ]]; then
+          name="$1"
+        else
+          wtm_err "Unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then
+    wtm_err "Worktree name is required. Usage: wtm delete <name> [--force]"
+  fi
+
+  wtm_ensure_bare
+
+  local wt_path=""
+  local wt_branch=""
+  local wt_isBare=""
+  while IFS='|' read -r path commit branch isBare; do
+    if [[ "$path" == */"$name" || "$branch" == "$name" ]]; then
+      wt_path="$path"
+      wt_branch="$branch"
+      wt_isBare="$isBare"
+      break
+    fi
+  done < <(wtm_list_worktrees_json)
+
+  if [[ -z "$wt_path" ]]; then
+    wtm_err "Worktree '$name' not found"
+  fi
+
+  if [[ "$wt_isBare" == "1" || "$wt_branch" == "" ]]; then
+    wtm_err "Cannot delete bare repository"
+  fi
+
+  local force_flag=""
+  if [[ "$force" == "1" ]]; then
+    force_flag="--force"
+  fi
+
+  # shellcheck disable=SC2086
+  git worktree remove "$wt_path" $force_flag
+  wtm_success "Deleted worktree '$name' at $wt_path"
+}
+
+# =============================================================================
+# cleanup
+# =============================================================================
+
+wtm_cmd_cleanup() {
+  local base_branch=""
+  local dry_run=0
+  local yes_mode=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --base)
+        base_branch="$2"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      --yes)
+        yes_mode=1
+        shift
+        ;;
+      -*)
+        wtm_err "Unknown flag: $1"
+        ;;
+      *)
+        wtm_err "Unexpected argument: $1"
+        ;;
+    esac
+  done
+
+  wtm_ensure_bare
+
+  # Detect base branch
+  if [[ -z "$base_branch" ]]; then
+    base_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|^refs/remotes/origin/||' || true)
+    if [[ -z "$base_branch" ]]; then
+      if git show-ref --verify --quiet refs/remotes/origin/main; then
+        base_branch="main"
+      elif git show-ref --verify --quiet refs/remotes/origin/master; then
+        base_branch="master"
+      else
+        wtm_err "Could not detect base branch. No origin/HEAD, main, or master found. Please specify a base branch with --base <branch>"
+      fi
+    fi
+  fi
+
+  echo "Using base branch: $base_branch"
+  echo "Fetching latest from origin/$base_branch..."
+  git fetch origin "$base_branch" >/dev/null 2>&1 || wtm_err "Failed to fetch origin/$base_branch"
+
+  echo "Scanning worktrees for cleanup candidates..."
+
+  local names=()
+  local paths=()
+  local branches=()
+  local commits=()
+
+  local total=0 checked=0
+  total=$(wtm_list_worktrees_json | wc -l | tr -d ' ')
+
+  while IFS='|' read -r path commit branch isBare; do
+    ((checked++)) || true
+    if [[ "$isBare" == "1" ]]; then
+      continue
+    fi
+    if [[ "$branch" == "main" || "$branch" == "master" || "$branch" == "next" || "$branch" == "prerelease" ]]; then
+      continue
+    fi
+
+    local wt_name
+    wt_name=$(basename "$path")
+
+    printf '\rChecking worktree %d/%d: %s...' "$checked" "$total" "$wt_name"
+
+    # isMerged?
+    local merged=0
+    # remote branch deleted?
+    if ! git ls-remote --heads origin "$branch" | grep -q "$branch"; then
+      merged=1
+    else
+      if git merge-base --is-ancestor "$commit" "origin/$base_branch" 2>/dev/null; then
+        merged=1
+      fi
+    fi
+
+    if [[ "$merged" == "0" ]]; then
+      continue
+    fi
+
+    # uncommitted changes?
+    local dirty=0
+    if ! git -C "$path" diff --quiet 2>/dev/null; then
+      dirty=1
+    fi
+    if ! git -C "$path" diff --cached --quiet 2>/dev/null; then
+      dirty=1
+    fi
+    if [[ -n $(git -C "$path" ls-files --others --exclude-standard 2>/dev/null) ]]; then
+      dirty=1
+    fi
+    if [[ "$dirty" == "1" ]]; then
+      continue
+    fi
+
+    # unpushed commits?
+    local unpushed=0
+    if [[ -n $(git -C "$path" log "origin/$base_branch..HEAD" --oneline 2>/dev/null) ]]; then
+      unpushed=1
+    fi
+    if [[ "$unpushed" == "1" ]]; then
+      continue
+    fi
+
+    names+=("$wt_name")
+    paths+=("$path")
+    branches+=("$branch")
+    commits+=("$commit")
+  done < <(wtm_list_worktrees_json)
+
+  printf '\r%60s\r' ''
+
+  if [[ ${#names[@]} -eq 0 ]]; then
+    echo "No worktrees found that are safe to clean up."
+    echo "Worktrees are kept if they have uncommitted changes, unpushed commits, or unmerged branches."
+    return 0
+  fi
+
+  echo ""
+  echo "Found ${#names[@]} worktree(s) safe to clean up:"
+  for i in "${!names[@]}"; do
+    echo "  - ${names[$i]} [${branches[$i]}]"
+  done
+
+  if [[ "$dry_run" == "1" ]]; then
+    echo ""
+    echo "Dry run mode — no worktrees were deleted."
+    return 0
+  fi
+
+  local to_delete_indices=()
+
+  if [[ "$yes_mode" == "1" ]]; then
+    for i in "${!names[@]}"; do
+      to_delete_indices+=("$i")
+    done
+  else
+    echo ""
+    echo "Select worktrees to delete (space-separated numbers, or type 'all'):"
+    for i in "${!names[@]}"; do
+      echo "  [$i] ${names[$i]} [${branches[$i]}]"
+    done
+    echo -n "> "
+    read -r selection
+
+    if [[ "$selection" == "all" ]]; then
+      for i in "${!names[@]}"; do
+        to_delete_indices+=("$i")
+      done
+    else
+      for num in $selection; do
+        if [[ "$num" =~ ^[0-9]+$ && "$num" -ge 0 && "$num" -lt ${#names[@]} ]]; then
+          to_delete_indices+=("$num")
+        else
+          wtm_err "Invalid selection: $num"
+        fi
+      done
+    fi
+
+    if [[ ${#to_delete_indices[@]} -eq 0 ]]; then
+      echo "No worktrees selected for deletion."
+      return 0
+    fi
+
+    echo -n "Delete ${#to_delete_indices[@]} worktree(s)? [y/N] "
+    read -r confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+      echo "Cleanup cancelled."
+      return 0
+    fi
+  fi
+
+  echo ""
+  for idx in "${to_delete_indices[@]}"; do
+    local wt_name="${names[$idx]}"
+    local wt_path="${paths[$idx]}"
+    if git worktree remove "$wt_path" --force 2>/dev/null; then
+      echo "Deleted $wt_name"
+    else
+      wtm_warn "Failed to delete $wt_name"
+    fi
+  done
+
+  git worktree prune 2>/dev/null || true
+  echo "Pruned stale worktree references."
+  echo ""
+  echo "Cleanup complete. Deleted ${#to_delete_indices[@]} worktree(s)."
+}
+
+# =============================================================================
+# help
+# =============================================================================
+
+wtm_print_help() {
+  cat <<'EOF'
+🌳 Worktree Manager (wtm) - Git worktree management made simple
+
+USAGE:
+  wtm <command> [args] [flags]
+
+COMMANDS:
+  init <url> [path]                     Clone repo as wtm-managed bare repository
+  init [path]                           Adopt existing repo into wtm structure
+  create <name> --from <base_branch>    Create a new worktree and spawn shell
+                        --no-shell      Create worktree without spawning shell
+  checkout <name>                       Create worktree from remote branch
+  list                                  List all worktrees
+  delete <name> [--force]               Delete a worktree
+  cleanup [options]                     Find and delete merged worktrees
+  help                                  Show this help message
+
+CLEANUP OPTIONS:
+  --base <branch>                       Base branch for merge detection (auto-detected)
+  --dry-run                             Show what would be deleted without deleting
+  --yes                                 Delete all merged worktrees without prompting
+
+EXAMPLES:
+  wtm init git@github.com:user/repo.git Clone and setup bare repo structure
+  wtm init git@gitlab.com:org/repo.git myrepo  Clone with custom directory name
+  wtm init                              Adopt current repo into wtm structure
+  wtm init ~/projects/myrepo            Adopt existing repo at path
+  wtm create feature-auth --from main   Create worktree from main (spawns new shell)
+  wtm create hotfix-123 --from master   Create worktree from master
+  wtm checkout feature-auth             Create worktree from remote branch feature-auth
+  wtm list                              Show all worktrees
+  wtm delete feature-auth               Delete worktree
+  wtm delete feature-auth --force       Force delete worktree
+  wtm cleanup                           Find and delete merged worktrees interactively
+  wtm cleanup --base main               Use main as base branch for merge detection
+  wtm cleanup --dry-run                 Show what would be deleted
+  wtm cleanup --yes                     Delete all merged worktrees without prompting
+
+FEATURES:
+  • Automatically fetches latest changes from base branch
+  • Works only in bare git repositories
+  • Creates new branch for each worktree
+  • Spawns new shell in worktree after creation
+  • Safe deletion with confirmation prompts
+  • Clear status and error messages
+  • Hook system: commit scripts to .wtm/ in your worktree (e.g., .wtm/post_create)
+  • Adopt existing repos without re-cloning
+EOF
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+main() {
+  local command="${1:-help}"
+  shift || true
+
+  case "$command" in
+    init)
+      wtm_cmd_init "$@"
+      ;;
+    create)
+      wtm_cmd_create "$@"
+      ;;
+    checkout)
+      wtm_cmd_checkout "$@"
+      ;;
+    list)
+      wtm_cmd_list "$@"
+      ;;
+    delete)
+      wtm_cmd_delete "$@"
+      ;;
+    cleanup)
+      wtm_cmd_cleanup "$@"
+      ;;
+    help|--help|-h)
+      wtm_print_help
+      ;;
+    *)
+      wtm_err "Unknown command: $command"
+      ;;
+  esac
+}
+
+main "$@"
