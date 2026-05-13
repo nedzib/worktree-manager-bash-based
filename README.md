@@ -23,6 +23,8 @@ Worktree Manager simplifies Git worktree operations, making it easy to work with
 
 - Bash (any modern version)
 - Git installed and configured
+- [fzf](https://github.com/junegunn/fzf) — required for interactive `wtm create` mode
+- [gh](https://cli.github.com/) (optional) — enhances branch listing in interactive mode
 
 ### Install with install.sh (recommended)
 
@@ -174,6 +176,25 @@ wtm create review-pr --from feature-x
 6. Spawns a new shell session in the worktree directory
 
 **Important:** This command starts a new shell in the worktree. When you're done working, use `exit` to return to your original shell in the bare repository.
+
+### `wtm create` — Interactive Mode
+
+Run `wtm create` without arguments to enter an interactive flow with `fzf`:
+
+```bash
+# Interactive mode
+wtm create
+```
+
+**What it does:**
+
+1. Prompts for a worktree directory name
+2. Asks if you already have an existing branch
+   - **Yes**: lists all branches (via `gh` or `git`) with `fzf`, select one. The worktree is created checked out on that existing branch.
+   - **No**: prompts for a new branch name, then select a base branch with `fzf`. Creates the new branch and worktree from that base.
+3. Executes the `.wtm/post_create` hook if present
+
+**Requires:** `fzf` installed. If `gh` (GitHub CLI) is available, it will be used for richer branch listings; otherwise falls back to `git branch -a`.
 
 ### `wtm checkout <name>`
 

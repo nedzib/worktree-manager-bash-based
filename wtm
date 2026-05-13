@@ -45,6 +45,27 @@ wtm_ensure_bare() {
   fi
 }
 
+wtm_resolve_bare_path() {
+  local git_dir="" git_common_dir=""
+
+  git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
+  git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null || true)
+
+  if [[ -z "$git_common_dir" ]]; then
+    wtm_err "Not a git repository"
+  fi
+
+  if [[ "$git_dir" == "$git_common_dir" && "$(git config --get core.bare 2>/dev/null || true)" == "true" ]]; then
+    echo "$(pwd)"
+  elif [[ "$(git config --get core.bare 2>/dev/null || true)" != "true" ]]; then
+    local bare_path
+    bare_path=$(dirname "$git_common_dir")
+    echo "$bare_path"
+  else
+    wtm_err "This command must be run in a wtm-managed bare repository or one of its worktrees"
+  fi
+}
+
 wtm_repo_name_from_url() {
   local url="$1"
   url="${url%/}"
@@ -165,6 +186,57 @@ wtm_run_hook() {
     fi
   ) || wtm_err "Hook $hook_name failed"
   wtm_success "$hook_name hook completed successfully"
+}
+
+# =============================================================================
+# Interactive helpers
+# =============================================================================
+
+wtm_prompt() {
+  local msg="$1"
+  local default="${2:-}"
+  local input=""
+  while [[ -z "$input" ]]; do
+    if [[ -n "$default" ]]; then
+      printf "%s [%s]: " "$msg" "$default"
+    else
+      printf "%s: " "$msg"
+    fi
+    read -r input
+    if [[ -z "$input" && -n "$default" ]]; then
+      input="$default"
+    fi
+  done
+  echo "$input"
+}
+
+wtm_confirm() {
+  local msg="$1"
+  printf "%s [y/N]: " "$msg"
+  read -r input
+  [[ "$input" =~ ^[Yy]$ ]]
+}
+
+wtm_select_branch_fzf() {
+  local prompt="${1:-Select branch}"
+  local branches=""
+
+  branches=$(git for-each-ref --format="%(refname:short)" refs/heads refs/remotes 2>/dev/null | grep -v '/HEAD$' | sort -u || true)
+
+  if [[ -z "$branches" ]]; then
+    wtm_err "No branches found."
+  fi
+
+  if ! command -v fzf &>/dev/null; then
+    wtm_err "fzf is required for interactive branch selection. Install it: https://github.com/junegunn/fzf"
+  fi
+
+  local selected
+  selected=$(echo "$branches" | fzf --prompt="$prompt > " --height=40% --reverse)
+  if [[ -z "$selected" ]]; then
+    wtm_err "No branch selected."
+  fi
+  echo "$selected"
 }
 
 # =============================================================================
@@ -367,6 +439,7 @@ wtm_cmd_create() {
   local name=""
   local base_branch=""
   local no_shell=0
+  local interactive=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -376,6 +449,10 @@ wtm_cmd_create() {
         ;;
       --no-shell)
         no_shell=1
+        shift
+        ;;
+      --interactive|-i)
+        interactive=1
         shift
         ;;
       -*)
@@ -392,34 +469,134 @@ wtm_cmd_create() {
     esac
   done
 
+  # If no name provided, enter interactive mode
   if [[ -z "$name" ]]; then
-    wtm_err "Worktree name is required. Usage: wtm create <name> --from <base_branch>"
-  fi
-  if [[ -z "$base_branch" ]]; then
-    wtm_err "Base branch is required. Usage: wtm create <name> --from <base_branch>"
+    interactive=1
   fi
 
-  # Detect context: bare repo or inside a worktree
+  # Resolve bare repo path
   local bare_path=""
-  local git_dir="" git_common_dir=""
+  bare_path=$(wtm_resolve_bare_path)
 
-  git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
-  git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null || true)
-
-  if [[ -z "$git_common_dir" ]]; then
-    wtm_err "Not a git repository"
-  fi
-
-  if [[ "$git_dir" == "$git_common_dir" && "$(git config --get core.bare 2>/dev/null || true)" == "true" ]]; then
-    bare_path="$(pwd)"
-  elif [[ "$(git config --get core.bare 2>/dev/null || true)" != "true" ]]; then
-    bare_path=$(dirname "$git_common_dir")
+  if [[ "$bare_path" != "$(pwd)" ]]; then
     echo "ℹ️  Running from inside a worktree. Creating in bare repo: $bare_path"
-  else
-    wtm_err "This command must be run in a wtm-managed bare repository or one of its worktrees"
   fi
 
   cd "$bare_path"
+
+  # --- Interactive mode ---
+  if [[ "$interactive" == "1" ]]; then
+    if ! command -v fzf &>/dev/null; then
+      wtm_err "Interactive mode requires fzf. Install it: https://github.com/junegunn/fzf"
+    fi
+
+    echo "🌳 Interactive worktree creation"
+    echo ""
+
+    # 1. Worktree directory name
+    printf "Nombre del directorio: " >&2
+    read -r name
+    name=${name// /_}
+
+    if [[ -z "$name" ]]; then
+      wtm_err "Directorio vacio"
+    fi
+
+    local worktree_path="$bare_path/$name"
+    if [[ -e "$worktree_path" ]]; then
+      wtm_err "Path already exists: $worktree_path"
+    fi
+
+    # 2. Does the branch already exist?
+    printf "La rama ya existe? [s/N]: " >&2
+    read -r has_branch
+
+    if [[ "$has_branch" =~ ^[sS]$ ]]; then
+      # Select existing branch with fzf
+      local branch_ref=""
+      branch_ref=$(git for-each-ref --format="%(refname:short)" refs/heads refs/remotes 2>/dev/null | grep -v '/HEAD$' | fzf --prompt="Selecciona rama: ")
+
+      if [[ -z "$branch_ref" ]]; then
+        wtm_err "No seleccionaste rama"
+      fi
+
+      if git show-ref --verify --quiet "refs/heads/$branch_ref"; then
+        # Local branch selected
+        git worktree add "$worktree_path" "$branch_ref"
+        wtm_success "Created worktree '$name' from local branch '$branch_ref'"
+
+        wtm_run_hook "$worktree_path" "post_create" "$name" "$branch_ref"
+      elif git show-ref --verify --quiet "refs/remotes/$branch_ref"; then
+        # Remote branch selected (e.g. origin/feature-x)
+        local local_branch="${branch_ref#origin/}"
+        if git show-ref --verify --quiet "refs/heads/$local_branch"; then
+          # A local branch with the same name already exists
+          git worktree add "$worktree_path" "$local_branch"
+          wtm_success "Created worktree '$name' from local branch '$local_branch'"
+        else
+          git worktree add -b "$local_branch" "$worktree_path" "$branch_ref"
+          wtm_success "Created worktree '$name' with new branch '$local_branch' tracking '$branch_ref'"
+
+          (
+            cd "$worktree_path"
+            git config "branch.$local_branch.remote" origin
+            git config "branch.$local_branch.merge" "refs/heads/$local_branch"
+          )
+        fi
+
+        wtm_run_hook "$worktree_path" "post_create" "$name" "$local_branch"
+      else
+        wtm_err "Branch '$branch_ref' not found"
+      fi
+    else
+      # Create new branch
+      local branch_name=""
+      branch_name=$(wtm_prompt "Nombre de la rama nueva")
+
+      if [[ -z "$branch_name" ]]; then
+        wtm_err "Rama vacia"
+      fi
+
+      if git show-ref --verify --quiet "refs/heads/$branch_name"; then
+        wtm_err "La rama local ya existe"
+      fi
+
+      # Select base branch
+      local base=""
+      base=$(git for-each-ref --format="%(refname:short)" refs/heads refs/remotes 2>/dev/null | grep -v '/HEAD$' | fzf --prompt="Selecciona rama base: ")
+
+      if [[ -z "$base" ]]; then
+        wtm_err "No seleccionaste rama base"
+      fi
+
+      # Normalize base branch name: strip remote prefix if present
+      if [[ "$base" == origin/* ]]; then
+        base="${base#origin/}"
+      fi
+
+      wtm_fetch_branch "$base"
+
+      git worktree add -b "$branch_name" "$worktree_path" "origin/$base"
+      wtm_success "Created worktree '$name' with new branch '$branch_name' from 'origin/$base'"
+
+      # Set up tracking
+      (
+        cd "$worktree_path"
+        git config "branch.$branch_name.remote" origin
+        git config "branch.$branch_name.merge" "refs/heads/$branch_name"
+        git fetch origin "$branch_name:refs/remotes/origin/$branch_name" 2>/dev/null || true
+      ) || wtm_warn "Could not set up remote tracking for branch $branch_name"
+
+      wtm_run_hook "$worktree_path" "post_create" "$name" "$base"
+    fi
+
+    return 0
+  fi
+
+  # --- Non-interactive mode ---
+  if [[ -z "$base_branch" ]]; then
+    wtm_err "Base branch is required. Usage: wtm create <name> --from <base_branch>"
+  fi
 
   wtm_fetch_branch "$base_branch"
 
@@ -462,24 +639,11 @@ wtm_cmd_checkout() {
     wtm_err "Worktree name is required. Usage: wtm checkout <name>"
   fi
 
-  # Detect context: bare repo or inside a worktree
   local bare_path=""
-  local git_dir="" git_common_dir=""
+  bare_path=$(wtm_resolve_bare_path)
 
-  git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
-  git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null || true)
-
-  if [[ -z "$git_common_dir" ]]; then
-    wtm_err "Not a git repository"
-  fi
-
-  if [[ "$git_dir" == "$git_common_dir" && "$(git config --get core.bare 2>/dev/null || true)" == "true" ]]; then
-    bare_path="$(pwd)"
-  elif [[ "$(git config --get core.bare 2>/dev/null || true)" != "true" ]]; then
-    bare_path=$(dirname "$git_common_dir")
+  if [[ "$bare_path" != "$(pwd)" ]]; then
     echo "ℹ️  Running from inside a worktree. Checking out in bare repo: $bare_path"
-  else
-    wtm_err "This command must be run in a wtm-managed bare repository or one of its worktrees"
   fi
 
   cd "$bare_path"
@@ -837,6 +1001,7 @@ USAGE:
 COMMANDS:
   init <url> [path]                     Clone repo as wtm-managed bare repository
   init [path]                           Adopt existing repo into wtm structure
+  create                                Interactive: prompts for name, branch, base
   create <name> --from <base_branch>    Create a new worktree and spawn shell
                         --no-shell      Create worktree without spawning shell
   checkout <name>                       Create worktree from remote branch
@@ -844,6 +1009,13 @@ COMMANDS:
   delete <name> [--force]               Delete a worktree
   cleanup [options]                     Find and delete merged worktrees
   help                                  Show this help message
+
+INTERACTIVE CREATE (when run without args):
+  wtm create                            Prompts for:
+                                          - Worktree directory name
+                                          - Whether you have an existing branch
+                                          - Select branch with fzf (if yes)
+                                          - New branch name + base branch (if no)
 
 CLEANUP OPTIONS:
   --base <branch>                       Base branch for merge detection (auto-detected)
@@ -857,6 +1029,7 @@ EXAMPLES:
   wtm init ~/projects/myrepo            Adopt existing repo at path
   wtm create feature-auth --from main   Create worktree from main (spawns new shell)
   wtm create hotfix-123 --from master   Create worktree from master
+  wtm create                            Interactive mode with fzf
   wtm checkout feature-auth             Create worktree from remote branch feature-auth
   wtm list                              Show all worktrees
   wtm delete feature-auth               Delete worktree
@@ -875,6 +1048,7 @@ FEATURES:
   • Clear status and error messages
   • Hook system: commit scripts to .wtm/ in your worktree (e.g., .wtm/post_create)
   • Adopt existing repos without re-cloning
+  • Interactive mode with fzf for branch selection
 EOF
 }
 
