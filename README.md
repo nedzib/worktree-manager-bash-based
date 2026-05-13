@@ -392,6 +392,30 @@ wtm create test-feature --from main
 
 Because hooks live in the bare repo directory and are not tracked by git, they are perfect for personal automation like opening tmux sessions, installing dependencies, or setting up local environment files.
 
+#### `pre_delete`
+
+Runs immediately before a worktree is deleted (via `wtm delete` or `wtm cleanup`), with the working directory set to the worktree being deleted.
+
+**Environment Variables:**
+
+- `$WORKTREE_DIR` — Absolute path to the worktree being deleted
+- `$WORKTREE_NAME` — Name of the worktree
+- `$BASE_BRANCH` — Branch the worktree was created from
+- `$BARE_REPO_PATH` — Path to the bare repository
+
+**Example `<bare-repo>/.wtm/pre_delete`:**
+
+```bash
+#!/bin/bash
+# Lives at <bare-repo>/.wtm/pre_delete
+
+# Kill tmux session for this worktree
+if tmux has-session -t "$WORKTREE_NAME" 2>/dev/null; then
+    echo "🪝 Killing tmux session: $WORKTREE_NAME"
+    tmux kill-session -t "$WORKTREE_NAME"
+fi
+```
+
 ### Migrating from earlier versions
 
 Earlier versions of wtm looked for hooks inside each worktree at `<worktree>/.wtm/<hook-name>`. That location is no longer consulted. To migrate:

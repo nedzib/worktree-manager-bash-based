@@ -804,6 +804,8 @@ wtm_cmd_delete() {
     force_flag="--force"
   fi
 
+  wtm_run_hook "$wt_path" "pre_delete" "$name" "$wt_branch"
+
   # shellcheck disable=SC2086
   git worktree remove "$wt_path" $force_flag
   wtm_success "Deleted worktree '$name' at $wt_path"
