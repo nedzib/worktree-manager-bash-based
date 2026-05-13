@@ -321,6 +321,57 @@ Pruned stale worktree references.
 Cleanup complete. Deleted 1 worktree(s).
 ```
 
+### `wtm set_review_watcher <owner/repo> <bare_path> [--base <branch>]`
+
+Registers a repository for automatic PR review watching. Stores configuration in `~/.config/wtm/repos.json`.
+
+```bash
+# Register a repo for PR review watching
+wtm set_review_watcher owner/repo ~/projects/myrepo
+
+# With custom base branch
+wtm set_review_watcher owner/repo ~/projects/myrepo --base develop
+```
+
+**Requirements:**
+- `gh` (GitHub CLI) authenticated
+- `jq` installed
+- The bare repo path must exist
+
+### `wtm watch_reviews`
+
+Checks configured repos for PRs where you are assigned as a reviewer. Automatically creates worktrees for new PRs using the naming convention `<author>_<pr_number>`.
+
+```bash
+# Run manually
+wtm watch_reviews
+```
+
+**What it does:**
+1. Reads `~/.config/wtm/repos.json`
+2. For each configured repo, queries GitHub for PRs where you're a requested reviewer
+3. Skips PRs that already have a worktree created
+4. Creates a worktree named `<author>_<pr_number>` checked out on the PR branch
+5. Executes the `post_create_review` hook if present in the bare repo
+6. Sends a macOS notification when a new PR worktree is created
+
+**LaunchDaemon (macOS):**
+
+To run automatically every 5 minutes:
+
+```bash
+# Load the watcher
+launchctl load ~/Library/LaunchAgents/com.wtm.review-watcher.plist
+
+# Unload when needed
+launchctl unload ~/Library/LaunchAgents/com.wtm.review-watcher.plist
+
+# Check status
+launchctl list | grep com.wtm.review-watcher
+```
+
+Logs are written to `/tmp/wtm-review-watcher.out` and `/tmp/wtm-review-watcher.err`.
+
 ### `wtm help`
 
 Shows comprehensive help information including examples and features.
@@ -414,6 +465,52 @@ if tmux has-session -t "$WORKTREE_NAME" 2>/dev/null; then
     echo "🪝 Killing tmux session: $WORKTREE_NAME"
     tmux kill-session -t "$WORKTREE_NAME"
 fi
+```
+
+#### `post_create_review`
+
+Runs immediately after a worktree is created for PR review (via `wtm watch_reviews`), with the working directory set to the new worktree.
+
+**Environment Variables:**
+
+- `$WORKTREE_DIR` — Absolute path to the new worktree
+- `$WORKTREE_NAME` — Name of the worktree (format: `<author>_<pr_number>`)
+- `$BASE_BRANCH` — Branch the worktree was created from
+- `$BARE_REPO_PATH` — Path to the bare repository
+
+**Example `<bare-repo>/.wtm/post_create_review`:**
+
+```bash
+#!/bin/bash
+# Lives at <bare-repo>/.wtm/post_create_review
+
+# Create a tmux session for PR review
+SESSION_NAME="$WORKTREE_NAME"
+
+if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+    echo "🪝 tmux session '$SESSION_NAME' already exists"
+else
+    echo "🖥️  Creating tmux session '$SESSION_NAME' for PR review"
+    tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_DIR"
+fi
+
+# Open the PR in browser (optional)
+# gh pr view "$WORKTREE_NAME" --web 2>/dev/null || true
+
+# Open editor in tmux (optional)
+# tmux send-keys -t "$SESSION_NAME" 'nvim' Enter
+```
+
+**Setup:**
+
+```bash
+# In the bare repository directory
+cd /path/to/your-bare-repo
+mkdir -p .wtm
+$EDITOR .wtm/post_create_review
+
+# Make it executable
+chmod +x .wtm/post_create_review
 ```
 
 ### Migrating from earlier versions

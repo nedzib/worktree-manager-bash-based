@@ -812,6 +812,203 @@ wtm_cmd_delete() {
 }
 
 # =============================================================================
+# set_review_watcher
+# =============================================================================
+
+wtm_cmd_set_review_watcher() {
+  local repo=""
+  local bare_path=""
+  local base_branch="main"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --base)
+        base_branch="$2"
+        shift 2
+        ;;
+      -*)
+        wtm_err "Unknown flag: $1"
+        ;;
+      *)
+        if [[ -z "$repo" ]]; then
+          repo="$1"
+        elif [[ -z "$bare_path" ]]; then
+          bare_path="$1"
+        else
+          wtm_err "Unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$repo" || -z "$bare_path" ]]; then
+    wtm_err "Usage: wtm set_review_watcher <owner/repo> <bare_path> [--base <branch>]"
+  fi
+
+  if [[ ! -d "$bare_path" ]]; then
+    wtm_err "Bare repo path does not exist: $bare_path"
+  fi
+
+  if ! command -v jq &>/dev/null; then
+    wtm_err "This command requires jq. Install it: https://jqlang.github.io/jq/"
+  fi
+
+  local config_dir="$HOME/.config/wtm"
+  local config_file="$config_dir/repos.json"
+  mkdir -p "$config_dir"
+
+  if [[ ! -f "$config_file" ]]; then
+    echo '{"repos":[]}' > "$config_file"
+  fi
+
+  # Validate it's valid JSON
+  if ! jq empty "$config_file" 2>/dev/null; then
+    wtm_err "Invalid JSON in $config_file"
+  fi
+
+  # Check if repo already exists
+  if jq -e --arg r "$repo" '.repos[] | select(.repo == $r)' "$config_file" &>/dev/null; then
+    # Update existing
+    jq --arg r "$repo" --arg p "$bare_path" --arg b "$base_branch" '
+      .repos |= map(if .repo == $r then {repo: $r, bare_path: $p, base_branch: $b} else . end)
+    ' "$config_file" > "$config_file.tmp" && mv "$config_file.tmp" "$config_file"
+    wtm_success "Updated watcher config for $repo"
+  else
+    # Add new
+    jq --arg r "$repo" --arg p "$bare_path" --arg b "$base_branch" \
+      '.repos += [{repo: $r, bare_path: $p, base_branch: $b}]' \
+      "$config_file" > "$config_file.tmp" && mv "$config_file.tmp" "$config_file"
+    wtm_success "Added watcher config for $repo"
+  fi
+}
+
+# =============================================================================
+# watch_reviews
+# =============================================================================
+
+wtm_cmd_watch_reviews() {
+  local config_file="$HOME/.config/wtm/repos.json"
+
+  if [[ ! -f "$config_file" ]]; then
+    wtm_err "No review watcher config found. Run: wtm set_review_watcher <owner/repo> <bare_path>"
+  fi
+
+  if ! command -v gh &>/dev/null; then
+    wtm_err "This command requires gh (GitHub CLI). Install it: https://cli.github.com/"
+  fi
+
+  if ! command -v jq &>/dev/null; then
+    wtm_err "This command requires jq. Install it: https://jqlang.github.io/jq/"
+  fi
+
+  local gh_login
+  gh_login=$(gh api user --jq .login 2>/dev/null) || {
+    wtm_err "Failed to get GitHub user. Is gh authenticated?"
+  }
+
+  local repo_count
+  repo_count=$(jq '.repos | length' "$config_file")
+
+  if [[ "$repo_count" -eq 0 ]]; then
+    wtm_err "No repos configured in $config_file"
+  fi
+
+  for ((i=0; i<repo_count; i++)); do
+    local repo bare_path base_branch
+    repo=$(jq -r ".repos[$i].repo" "$config_file")
+    bare_path=$(jq -r ".repos[$i].bare_path" "$config_file")
+    base_branch=$(jq -r ".repos[$i].base_branch // \"main\"" "$config_file")
+
+    if [[ ! -d "$bare_path" ]]; then
+      wtm_warn "Bare repo not found: $bare_path (skipping $repo)"
+      continue
+    fi
+
+    # List PRs where user is requested reviewer
+    local prs
+    prs=$(gh pr list \
+      --repo "$repo" \
+      --search "review-requested:@me is:open" \
+      --json number,title,headRefName,author \
+      2>/dev/null) || {
+      wtm_warn "Failed to list PRs for $repo (skipping)"
+      continue
+    }
+
+    local pr_count
+    pr_count=$(echo "$prs" | jq 'length')
+
+    if [[ "$pr_count" -eq 0 ]]; then
+      continue
+    fi
+
+    while IFS= read -r pr; do
+      local pr_number title branch author
+      pr_number=$(echo "$pr" | jq -r '.number')
+      title=$(echo "$pr" | jq -r '.title')
+      branch=$(echo "$pr" | jq -r '.headRefName')
+      author=$(echo "$pr" | jq -r '.author.login')
+
+      # Verify direct assignment (not team)
+      local direct_reviewers
+      direct_reviewers=$(gh api "repos/${repo}/pulls/${pr_number}" \
+        --jq '[.requested_reviewers[].login]' 2>/dev/null) || direct_reviewers="[]"
+
+      if ! echo "$direct_reviewers" | jq -e --arg u "$gh_login" 'index($u) != null' &>/dev/null; then
+        continue
+      fi
+
+      # Check if worktree already exists
+      local worktree_name="${author}_${pr_number}"
+      local worktree_path="$bare_path/$worktree_name"
+
+      if [[ -d "$worktree_path" ]]; then
+        continue
+      fi
+
+      echo "🔔 New PR assigned: #$pr_number ($title) by $author"
+
+      # Create worktree
+      cd "$bare_path"
+
+      # Fetch the PR branch
+      git fetch origin "$branch" --quiet 2>/dev/null || {
+        wtm_warn "Failed to fetch $branch for PR #$pr_number"
+        continue
+      }
+
+      # Create worktree on the PR branch
+      if git show-ref --verify --quiet "refs/heads/$branch"; then
+        # Local branch exists, checkout directly
+        git worktree add "$worktree_path" "$branch"
+      else
+        # Create local tracking branch
+        git worktree add -b "$branch" "$worktree_path" "origin/$branch"
+      fi
+
+      wtm_success "Created review worktree '$worktree_name' for PR #$pr_number"
+
+      # Set up tracking
+      (
+        cd "$worktree_path"
+        git config "branch.$branch.remote" origin
+        git config "branch.$branch.merge" "refs/heads/$branch"
+      ) || wtm_warn "Could not set up tracking for $branch"
+
+      # Run post_create_review hook
+      wtm_run_hook "$worktree_path" "post_create_review" "$worktree_name" "$base_branch"
+
+      # macOS notification
+      if command -v osascript &>/dev/null; then
+        osascript -e \
+          "display notification \"PR #$pr_number: $title\" with title \"PR Review Assigned\" subtitle \"$repo\" sound name \"Glass\"" 2>/dev/null || true
+      fi
+    done < <(echo "$prs" | jq -c '.[]')
+  done
+}
+
+# =============================================================================
 # cleanup
 # =============================================================================
 
@@ -1033,6 +1230,9 @@ COMMANDS:
   list                                  List all worktrees
   delete                                Interactive: select worktree with fzf
   delete <name> [--force]               Delete a worktree
+  set_review_watcher <repo> <path>      Register a repo for PR review watching
+                        --base <branch> Base branch for the repo (default: main)
+  watch_reviews                         Check for assigned PRs and open worktrees
   cleanup [options]                     Find and delete merged worktrees
   help                                  Show this help message
 
@@ -1069,6 +1269,8 @@ EXAMPLES:
   wtm cleanup --base main               Use main as base branch for merge detection
   wtm cleanup --dry-run                 Show what would be deleted
   wtm cleanup --yes                     Delete all merged worktrees without prompting
+  wtm set_review_watcher buk/repo ~/dev/buk/repo  Register repo for PR watching
+  wtm watch_reviews                     Check for assigned PRs
 
 FEATURES:
   • Automatically fetches latest changes from base branch
@@ -1109,6 +1311,12 @@ main() {
       ;;
     cleanup)
       wtm_cmd_cleanup "$@"
+      ;;
+    set_review_watcher)
+      wtm_cmd_set_review_watcher "$@"
+      ;;
+    watch_reviews)
+      wtm_cmd_watch_reviews "$@"
       ;;
     --version|-v)
       echo "wtm version $WTM_VERSION"
