@@ -790,6 +790,7 @@ wtm_cmd_cleanup() {
 wtm_print_help() {
   cat <<'EOF'
 🌳 Worktree Manager (wtm) - Git worktree management made simple
+  Rework of https://github.com/jarredkenny/worktree-manager
 
 USAGE:
   wtm <command> [args] [flags]
