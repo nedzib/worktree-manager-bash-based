@@ -40,22 +40,6 @@ wtm help
 
 The installer copies `wtm` to `~/.local/bin` (or `/usr/local/bin` if writable) and ensures it's executable.
 
-### Install from npm
-
-```bash
-# Install globally with your preferred package manager
-npm install -g @jx0/wtm
-
-# or
-pnpm add -g @jx0/wtm
-
-# or
-yarn global add @jx0/wtm
-
-# Verify installation
-wtm help
-```
-
 ### Manual / Development Setup
 
 ```bash
