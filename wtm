@@ -399,11 +399,31 @@ wtm_cmd_create() {
     wtm_err "Base branch is required. Usage: wtm create <name> --from <base_branch>"
   fi
 
-  wtm_ensure_bare
+  # Detect context: bare repo or inside a worktree
+  local bare_path=""
+  local git_dir="" git_common_dir=""
+
+  git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
+  git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null || true)
+
+  if [[ -z "$git_common_dir" ]]; then
+    wtm_err "Not a git repository"
+  fi
+
+  if [[ "$git_dir" == "$git_common_dir" && "$(git config --get core.bare 2>/dev/null || true)" == "true" ]]; then
+    bare_path="$(pwd)"
+  elif [[ "$(git config --get core.bare 2>/dev/null || true)" != "true" ]]; then
+    bare_path=$(dirname "$git_common_dir")
+    echo "ℹ️  Running from inside a worktree. Creating in bare repo: $bare_path"
+  else
+    wtm_err "This command must be run in a wtm-managed bare repository or one of its worktrees"
+  fi
+
+  cd "$bare_path"
+
   wtm_fetch_branch "$base_branch"
 
-  local worktree_path
-  worktree_path="$(pwd)/$name"
+  local worktree_path="$bare_path/$name"
 
   if [[ -e "$worktree_path" ]]; then
     wtm_err "Path already exists: $worktree_path"
@@ -442,7 +462,27 @@ wtm_cmd_checkout() {
     wtm_err "Worktree name is required. Usage: wtm checkout <name>"
   fi
 
-  wtm_ensure_bare
+  # Detect context: bare repo or inside a worktree
+  local bare_path=""
+  local git_dir="" git_common_dir=""
+
+  git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
+  git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null || true)
+
+  if [[ -z "$git_common_dir" ]]; then
+    wtm_err "Not a git repository"
+  fi
+
+  if [[ "$git_dir" == "$git_common_dir" && "$(git config --get core.bare 2>/dev/null || true)" == "true" ]]; then
+    bare_path="$(pwd)"
+  elif [[ "$(git config --get core.bare 2>/dev/null || true)" != "true" ]]; then
+    bare_path=$(dirname "$git_common_dir")
+    echo "ℹ️  Running from inside a worktree. Checking out in bare repo: $bare_path"
+  else
+    wtm_err "This command must be run in a wtm-managed bare repository or one of its worktrees"
+  fi
+
+  cd "$bare_path"
 
   local existing_path
   existing_path=$(wtm_find_worktree_path "$name" 2>/dev/null || true)
@@ -463,8 +503,7 @@ wtm_cmd_checkout() {
   echo "Found remote branch 'origin/$name'. Creating worktree..."
   wtm_fetch_branch "$name"
 
-  local worktree_path
-  worktree_path="$(pwd)/$name"
+  local worktree_path="$bare_path/$name"
 
   if git show-ref --verify --quiet "refs/heads/$name"; then
     git worktree add "$worktree_path" "$name"
