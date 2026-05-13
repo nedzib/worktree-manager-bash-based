@@ -236,11 +236,14 @@ main-work                      [main]              f5g6h7i8j
 (bare)                         (bare)              k9l0m1n2o
 ```
 
-### `wtm delete <name> [--force]`
+### `wtm delete [name] [--force]`
 
 Removes a worktree and its associated files.
 
 ```bash
+# Interactive mode - select worktree with fzf
+wtm delete
+
 # Safe deletion (with confirmation if needed)
 wtm delete feature-auth
 
@@ -248,11 +251,16 @@ wtm delete feature-auth
 wtm delete old-feature --force
 ```
 
+**Interactive mode:**
+
+When run without arguments, lists all worktrees with `fzf` for selection. After selecting a worktree, it asks for confirmation before deleting.
+
 **Safety features:**
 
 - Cannot delete bare repository
 - Validates worktree exists before deletion
 - Force flag available for stuck worktrees
+- Interactive mode requires confirmation before deletion
 
 ### `wtm cleanup [options]`
 

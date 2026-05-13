@@ -746,11 +746,38 @@ wtm_cmd_delete() {
     esac
   done
 
-  if [[ -z "$name" ]]; then
-    wtm_err "Worktree name is required. Usage: wtm delete <name> [--force]"
-  fi
-
   wtm_ensure_bare
+
+  # Interactive mode: select worktree with fzf
+  if [[ -z "$name" ]]; then
+    if ! command -v fzf &>/dev/null; then
+      wtm_err "Interactive mode requires fzf. Install it: https://github.com/junegunn/fzf"
+    fi
+
+    local selected=""
+    selected=$(
+      wtm_list_worktrees_json | while IFS='|' read -r path commit branch isBare; do
+        if [[ "$isBare" != "1" && -n "$branch" ]]; then
+          local wt_name
+          wt_name=$(basename "$path")
+          printf "%-30s %s\n" "$wt_name" "$branch"
+        fi
+      done | fzf --prompt="Select worktree to delete: " --height=40% --reverse
+    )
+
+    if [[ -z "$selected" ]]; then
+      wtm_err "No worktree selected"
+    fi
+
+    # Extract worktree name (first column)
+    name=$(echo "$selected" | awk '{print $1}')
+
+    # Ask for confirmation
+    if ! wtm_confirm "Delete worktree '$name'?"; then
+      echo "❌ Cancelled"
+      return 0
+    fi
+  fi
 
   local wt_path=""
   local wt_branch=""
@@ -1002,6 +1029,7 @@ COMMANDS:
                         --no-shell      Create worktree without spawning shell
   checkout <name>                       Create worktree from remote branch
   list                                  List all worktrees
+  delete                                Interactive: select worktree with fzf
   delete <name> [--force]               Delete a worktree
   cleanup [options]                     Find and delete merged worktrees
   help                                  Show this help message
@@ -1012,6 +1040,10 @@ INTERACTIVE CREATE (when run without args):
                                           - Whether you have an existing branch
                                           - Select branch with fzf (if yes)
                                           - New branch name + base branch (if no)
+
+INTERACTIVE DELETE (when run without args):
+  wtm delete                            Lists all worktrees with fzf,
+                                          asks for confirmation before deleting
 
 CLEANUP OPTIONS:
   --base <branch>                       Base branch for merge detection (auto-detected)
@@ -1028,6 +1060,7 @@ EXAMPLES:
   wtm create                            Interactive mode with fzf
   wtm checkout feature-auth             Create worktree from remote branch feature-auth
   wtm list                              Show all worktrees
+  wtm delete                            Interactive: select and delete with fzf
   wtm delete feature-auth               Delete worktree
   wtm delete feature-auth --force       Force delete worktree
   wtm cleanup                           Find and delete merged worktrees interactively
