@@ -56,6 +56,10 @@ Then verifies the local hash matches the remote hash. This handles stale/corrupt
 
 Hooks are per-worktree (committed to the branch), not per-repo.
 
+## Git discipline
+
+- **Never commit or push without explicit user authorization.** Always ask before running `git commit`, `git push`, or any git mutation. Do not assume implicit consent, even if the user previously asked for changes. Wait for an explicit "sí", "ok", "hazlo", or similar confirmation.
+
 ## What to leave alone
 
 - `install.sh` — simple copy-to-`~/.local/bin` installer. No fancy logic needed.
