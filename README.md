@@ -24,6 +24,22 @@ Worktree Manager simplifies Git worktree operations, making it easy to work with
 - Bash (any modern version)
 - Git installed and configured
 
+### Install with install.sh (recommended)
+
+```bash
+# Clone the repository
+git clone https://github.com/your-username/worktree-manager.git
+cd worktree-manager
+
+# Run the installer
+bash install.sh
+
+# Verify installation
+wtm help
+```
+
+The installer copies `wtm` to `~/.local/bin` (or `/usr/local/bin` if writable) and ensures it's executable.
+
 ### Install from npm
 
 ```bash

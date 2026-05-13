@@ -865,6 +865,9 @@ main() {
     cleanup)
       wtm_cmd_cleanup "$@"
       ;;
+    --version|-v)
+      echo "wtm version $WTM_VERSION"
+      ;;
     help|--help|-h)
       wtm_print_help
       ;;
