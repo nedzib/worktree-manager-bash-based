@@ -167,7 +167,7 @@ wtm_run_hook() {
   local bare_path
   bare_path="$(pwd)"
 
-  local hook_file="$worktree_path/.wtm/$hook_name"
+  local hook_file="$bare_path/.wtm/$hook_name"
   if [[ ! -f "$hook_file" ]]; then
     return 0
   fi
@@ -179,11 +179,7 @@ wtm_run_hook() {
     export BASE_BRANCH="$base_branch"
     export BARE_REPO_PATH="$bare_path"
     cd "$worktree_path"
-    if [[ -x "$hook_file" ]]; then
-      bash "$hook_file"
-    else
-      bash "$hook_file"
-    fi
+    bash "$hook_file"
   ) || wtm_err "Hook $hook_name failed"
   wtm_success "$hook_name hook completed successfully"
 }
@@ -1046,7 +1042,7 @@ FEATURES:
   • Spawns new shell in worktree after creation
   • Safe deletion with confirmation prompts
   • Clear status and error messages
-  • Hook system: commit scripts to .wtm/ in your worktree (e.g., .wtm/post_create)
+  • Hook system: place scripts in .wtm/ inside the bare repo (e.g., .wtm/post_create)
   • Adopt existing repos without re-cloning
   • Interactive mode with fzf for branch selection
 EOF

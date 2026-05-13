@@ -172,7 +172,7 @@ wtm create review-pr --from feature-x
 2. Fetches the latest changes from the base branch
 3. Creates a new branch named `<name>`
 4. Creates a worktree directory at `./<name>`
-5. Executes the `.wtm/post_create` hook if present in the new worktree
+5. Executes the `.wtm/post_create` hook if present in the bare repository
 6. Spawns a new shell session in the worktree directory
 
 **Important:** This command starts a new shell in the worktree. When you're done working, use `exit` to return to your original shell in the bare repository.
@@ -192,7 +192,7 @@ wtm create
 2. Asks if you already have an existing branch
    - **Yes**: lists all branches (via `gh` or `git`) with `fzf`, select one. The worktree is created checked out on that existing branch.
    - **No**: prompts for a new branch name, then select a base branch with `fzf`. Creates the new branch and worktree from that base.
-3. Executes the `.wtm/post_create` hook if present
+3. Executes the `.wtm/post_create` hook if present in the bare repository
 
 **Requires:** `fzf` installed. If `gh` (GitHub CLI) is available, it will be used for richer branch listings; otherwise falls back to `git branch -a`.
 
@@ -319,17 +319,17 @@ Shows comprehensive help information including examples and features.
 
 ## 🪝 Hook System
 
-Worktree Manager runs hook scripts at lifecycle events. Hooks live **inside the worktree** under `.wtm/`, so they can be committed to git and shared with the rest of the team — or `.gitignore`d for personal-only setup. Hooks are run with `bash`; the executable bit is not required.
+Worktree Manager runs hook scripts at lifecycle events. Hooks live **inside the bare repository** under `.wtm/`. They are local to your machine and are not tracked by git. Hooks are run with `bash`; the executable bit is not required.
 
 ### Discovery
 
 For each hook, wtm looks at exactly one location:
 
 ```
-<worktree>/.wtm/<hook-name>
+<bare-repo>/.wtm/<hook-name>
 ```
 
-If the file exists, it runs. If not, the hook is a silent no-op. Because hooks are checked out with the rest of the branch's tree, the hook that runs for a new worktree is the version committed on its base branch.
+If the file exists, it runs. If not, the hook is a silent no-op. Because hooks live in the bare repository directory (outside of git's tracking), they are personal to your local setup and apply to all worktrees created from that bare repo.
 
 ### Available Hooks
 
@@ -344,11 +344,11 @@ Runs immediately after a worktree is created (via `wtm create` or `wtm checkout`
 - `$BASE_BRANCH` — Branch the worktree was created from
 - `$BARE_REPO_PATH` — Path to the bare repository
 
-**Example `.wtm/post_create`:**
+**Example `<bare-repo>/.wtm/post_create`:**
 
 ```bash
 #!/bin/bash
-# Committed at .wtm/post_create on your base branch
+# Lives at <bare-repo>/.wtm/post_create
 
 echo "🪝 Setting up new worktree: $WORKTREE_NAME"
 
@@ -367,35 +367,29 @@ fi
 echo "✅ Worktree setup complete!"
 ```
 
-**Setup (shared, team hook):**
+**Setup:**
 
 ```bash
-# In a worktree on the branch you want to share the hook from (e.g. main)
+# In the bare repository directory
+cd /path/to/your-bare-repo
 mkdir -p .wtm
 $EDITOR .wtm/post_create
-git add .wtm/post_create
-git commit -m "chore: add wtm post_create hook"
-git push
 
-# Test by creating a new worktree from that branch
+# Make it executable (optional, but recommended)
+chmod +x .wtm/post_create
+
+# Test by creating a new worktree
 wtm create test-feature --from main
 ```
 
-**Setup (personal, untracked hook):**
-
-If you want a hook that only runs on your machine, add `.wtm/post_create` to `.git/info/exclude` (which is per-clone and not committed) before creating the file. wtm will still discover and run it — git just won't track it. Avoid putting `.wtm/` in the repo's `.gitignore`: that would block teammates from sharing hooks via the same path.
-
-### Security
-
-Because `.wtm/post_create` is committed to git, anyone with merge access to a branch you check out can run arbitrary code on your machine the moment you `wtm create` or `wtm checkout` from it. This is the same trust model as `npm install` post-install scripts and any other build scripts in the repo. Treat hook changes with the same care as any other code review.
+Because hooks live in the bare repo directory and are not tracked by git, they are perfect for personal automation like opening tmux sessions, installing dependencies, or setting up local environment files.
 
 ### Migrating from earlier versions
 
-Earlier versions of wtm looked for hooks at the **bare repository root** (e.g. `<bareRoot>/post_create`). That location is no longer consulted. To migrate:
+Earlier versions of wtm looked for hooks inside each worktree at `<worktree>/.wtm/<hook-name>`. That location is no longer consulted. To migrate:
 
-1. Move your existing hook to `.wtm/post_create` on the branch(es) you want it to run on (commonly your default branch, so new worktrees inherit it).
-2. Commit and push.
-3. Delete the old `<bareRoot>/post_create` file — it is now ignored by wtm and serves no purpose.
+1. Move your existing hook to `.wtm/post_create` inside the bare repository directory.
+2. Delete any old `<worktree>/.wtm/post_create` files — they are now ignored by wtm.
 
 ## 🏗️ Architecture
 
