@@ -354,6 +354,7 @@ wtm watch_reviews
 4. Creates a worktree named `<author>_<pr_number>` checked out on the PR branch
 5. Executes the `post_create_review` hook if present in the bare repo
 6. Sends a macOS notification when a new PR worktree is created
+7. **Auto-cleanup**: scans existing review worktrees (`<author>_<pr_number>`) and deletes those whose PRs are merged or closed, running the `pre_delete` hook before removal
 
 **LaunchDaemon (macOS):**
 
@@ -445,7 +446,7 @@ Because hooks live in the bare repo directory and are not tracked by git, they a
 
 #### `pre_delete`
 
-Runs immediately before a worktree is deleted (via `wtm delete` or `wtm cleanup`), with the working directory set to the worktree being deleted.
+Runs immediately before a worktree is deleted (via `wtm delete`, `wtm cleanup`, or `wtm watch_reviews` auto-cleanup), with the working directory set to the worktree being deleted.
 
 **Environment Variables:**
 

@@ -1005,6 +1005,43 @@ wtm_cmd_watch_reviews() {
           "display notification \"PR #$pr_number: $title\" with title \"PR Review Assigned\" subtitle \"$repo\" sound name \"Glass\"" 2>/dev/null || true
       fi
     done < <(echo "$prs" | jq -c '.[]')
+
+    # -------------------------------------------------------------------------
+    # Cleanup merged/closed review worktrees
+    # -------------------------------------------------------------------------
+    while IFS='|' read -r path commit branch isBare; do
+      if [[ "$isBare" == "1" || -z "$branch" ]]; then
+        continue
+      fi
+      local wt_name
+      wt_name=$(basename "$path")
+
+      # Match review worktree naming: <author>_<pr_number>
+      if [[ "$wt_name" =~ ^([a-zA-Z0-9_-]+)_([0-9]+)$ ]]; then
+        local expected_author="${BASH_REMATCH[1]}"
+        local pr_number="${BASH_REMATCH[2]}"
+
+        local pr_info
+        pr_info=$(gh api "repos/${repo}/pulls/${pr_number}" --jq '{state: .state, author: .user.login}' 2>/dev/null) || continue
+
+        local actual_author pr_state
+        actual_author=$(echo "$pr_info" | jq -r '.author')
+        pr_state=$(echo "$pr_info" | jq -r '.state')
+
+        # Only treat as a review worktree if the author matches the PR author
+        if [[ "$actual_author" != "$expected_author" ]]; then
+          continue
+        fi
+
+        if [[ "$pr_state" == "closed" || "$pr_state" == "merged" ]]; then
+          echo "🗑️  PR #$pr_number is $pr_state — deleting review worktree '$wt_name'"
+          (
+            cd "$bare_path"
+            wtm_cmd_delete "$wt_name" --force
+          ) || wtm_warn "Failed to delete review worktree '$wt_name'"
+        fi
+      fi
+    done < <(wtm_list_worktrees_json)
   done
 }
 
